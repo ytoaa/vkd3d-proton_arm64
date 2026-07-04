@@ -154,6 +154,9 @@ jobs:
           VKD3D_VERSION="${VKD3D_REF#v}"
           OUT_NAME="vkd3d-proton-${VKD3D_VERSION}-aarch64"
 
+          echo "VKD3D_VERSION=${VKD3D_VERSION}" >> "$GITHUB_ENV"
+          echo "VKD3D_OUT_NAME=${OUT_NAME}" >> "$GITHUB_ENV"
+
           mkdir -p "dist/${OUT_NAME}/aarch64"
 
           find pkg -type f -name "*.dll" -print
@@ -174,33 +177,36 @@ jobs:
           cd dist
           zip -r "${OUT_NAME}.zip" "${OUT_NAME}"
 
-      - name: Upload artifact
+      - name: Upload unpacked artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vkd3d-proton-${{ inputs.vkd3d_ref }}-aarch64
-          path: vkd3d-proton/dist/*.zip
+          name: ${{ env.VKD3D_OUT_NAME }}
+          path: vkd3d-proton/dist/${{ env.VKD3D_OUT_NAME }}
           if-no-files-found: error
 
       - name: Publish GitHub Release asset
         if: ${{ inputs.publish_release == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -eux
 
-          VKD3D_VERSION="${VKD3D_REF#v}"
-          RELEASE_TAG="vkd3d-proton-${VKD3D_VERSION}-aarch64"
+          RELEASE_TAG="${VKD3D_OUT_NAME}"
           RELEASE_TITLE="VKD3D-Proton ${VKD3D_REF} aarch64"
-          ZIP_PATH="vkd3d-proton/dist/vkd3d-proton-${VKD3D_VERSION}-aarch64.zip"
+          ZIP_PATH="vkd3d-proton/dist/${VKD3D_OUT_NAME}.zip"
 
           test -f "$ZIP_PATH"
 
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
             echo "Release already exists: $RELEASE_TAG"
           else
             gh release create "$RELEASE_TAG" \
+              --repo "$GH_REPO" \
               --title "$RELEASE_TITLE" \
               --notes "VKD3D-Proton ${VKD3D_REF} built for Windows ARM64 / aarch64 using llvm-mingw ${LLVM_MINGW_TAG}."
           fi
 
-          gh release upload "$RELEASE_TAG" "$ZIP_PATH" --clobber
+          gh release upload "$RELEASE_TAG" "$ZIP_PATH" \
+            --repo "$GH_REPO" \
+            --clobber
