@@ -11,9 +11,17 @@ on:
         description: "llvm-mingw release tag"
         required: true
         default: "20260616"
+      publish_release:
+        description: "Upload zip to GitHub Release"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -23,6 +31,7 @@ jobs:
     env:
       VKD3D_REF: ${{ inputs.vkd3d_ref }}
       LLVM_MINGW_TAG: ${{ inputs.llvm_mingw_tag }}
+      PUBLISH_RELEASE: ${{ inputs.publish_release }}
 
     steps:
       - name: Install build dependencies
@@ -171,3 +180,27 @@ jobs:
           name: vkd3d-proton-${{ inputs.vkd3d_ref }}-aarch64
           path: vkd3d-proton/dist/*.zip
           if-no-files-found: error
+
+      - name: Publish GitHub Release asset
+        if: ${{ inputs.publish_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+
+          VKD3D_VERSION="${VKD3D_REF#v}"
+          RELEASE_TAG="vkd3d-proton-${VKD3D_VERSION}-aarch64"
+          RELEASE_TITLE="VKD3D-Proton ${VKD3D_REF} aarch64"
+          ZIP_PATH="vkd3d-proton/dist/vkd3d-proton-${VKD3D_VERSION}-aarch64.zip"
+
+          test -f "$ZIP_PATH"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists: $RELEASE_TAG"
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes "VKD3D-Proton ${VKD3D_REF} built for Windows ARM64 / aarch64 using llvm-mingw ${LLVM_MINGW_TAG}."
+          fi
+
+          gh release upload "$RELEASE_TAG" "$ZIP_PATH" --clobber
