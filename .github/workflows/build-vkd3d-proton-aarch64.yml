@@ -1,10 +1,18 @@
 name: Build VKD3D-Proton aarch64
 
+run-name: Build VKD3D-Proton aarch64 (${{ github.event.inputs.vkd3d_ref || github.ref_name }})
+
 on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       vkd3d_ref:
-        description: "VKD3D-Proton git ref/tag"
+        description: "VKD3D-Proton git ref/tag/branch/SHA to build"
         required: true
         default: "v3.0.1"
       llvm_mingw_tag:
@@ -23,17 +31,76 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: Build VKD3D-Proton ${{ inputs.vkd3d_ref }} for Windows ARM64
+    name: Build VKD3D-Proton for Windows ARM64
     runs-on: ubuntu-22.04
 
     env:
-      VKD3D_REF: ${{ inputs.vkd3d_ref }}
-      LLVM_MINGW_TAG: ${{ inputs.llvm_mingw_tag }}
-      PUBLISH_RELEASE: ${{ inputs.publish_release }}
+      LLVM_MINGW_TAG: ${{ github.event.inputs.llvm_mingw_tag || '20260616' }}
 
     steps:
+      - name: Checkout VKD3D-Proton source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.vkd3d_ref || github.ref }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Resolve build metadata
+        id: meta
+        run: |
+          set -eux
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            REQUESTED_REF="${{ github.event.inputs.vkd3d_ref }}"
+          else
+            REQUESTED_REF="${GITHUB_REF}"
+          fi
+
+          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
+
+          if SRC_TAG="$(git describe --tags --exact-match 2>/dev/null)"; then
+            VERSION="${SRC_TAG#v}"
+            OUT_NAME="vkd3d-proton-${VERSION}-aarch64"
+            RELEASE_TITLE="VKD3D-Proton ${SRC_TAG} aarch64"
+          else
+            RAW_REF="$REQUESTED_REF"
+            RAW_REF="${RAW_REF#refs/heads/}"
+            RAW_REF="${RAW_REF#refs/tags/}"
+
+            if echo "$RAW_REF" | grep -Eq '^v[0-9]'; then
+              VERSION="${RAW_REF#v}"
+              OUT_NAME="vkd3d-proton-${VERSION}-aarch64"
+              RELEASE_TITLE="VKD3D-Proton ${RAW_REF} aarch64"
+            else
+              SAFE_REF="$(printf '%s' "$RAW_REF" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')"
+              if [ -z "$SAFE_REF" ]; then
+                SAFE_REF="manual"
+              fi
+
+              OUT_NAME="vkd3d-proton-${SAFE_REF}-aarch64"
+              RELEASE_TITLE="VKD3D-Proton ${SAFE_REF} aarch64 rolling build"
+            fi
+          fi
+
+          RELEASE_TAG="$OUT_NAME"
+
+          echo "requested_ref=$REQUESTED_REF" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "out_name=$OUT_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_title=$RELEASE_TITLE" >> "$GITHUB_OUTPUT"
+
+          echo "Requested ref: $REQUESTED_REF"
+          echo "Short SHA: $SHORT_SHA"
+          echo "Output name: $OUT_NAME"
+          echo "Release tag: $RELEASE_TAG"
+
       - name: Install build dependencies
         run: |
           set -eux
@@ -91,19 +158,7 @@ jobs:
 
           aarch64-w64-mingw32-clang --version
 
-      - name: Clone VKD3D-Proton source
-        run: |
-          set -eux
-
-          git clone --recursive --branch "$VKD3D_REF" \
-            https://github.com/HansKristian-Work/vkd3d-proton.git \
-            vkd3d-proton
-
-          cd vkd3d-proton
-          git submodule update --init --recursive
-
       - name: Create aarch64 Windows Meson cross file
-        working-directory: vkd3d-proton
         run: |
           set -eux
 
@@ -129,7 +184,6 @@ jobs:
           cat build-winarm64.txt
 
       - name: Build VKD3D-Proton aarch64
-        working-directory: vkd3d-proton
         run: |
           set -eux
 
@@ -147,15 +201,12 @@ jobs:
           ninja -C build.aarch64 install
 
       - name: Package DLLs
-        working-directory: vkd3d-proton
         run: |
           set -eux
 
-          VKD3D_VERSION="${VKD3D_REF#v}"
-          OUT_NAME="vkd3d-proton-${VKD3D_VERSION}-aarch64"
-
-          echo "VKD3D_VERSION=${VKD3D_VERSION}" >> "$GITHUB_ENV"
-          echo "VKD3D_OUT_NAME=${OUT_NAME}" >> "$GITHUB_ENV"
+          OUT_NAME="${{ steps.meta.outputs.out_name }}"
+          SHORT_SHA="${{ steps.meta.outputs.short_sha }}"
+          REQUESTED_REF="${{ steps.meta.outputs.requested_ref }}"
 
           mkdir -p "dist/${OUT_NAME}/aarch64"
 
@@ -172,6 +223,16 @@ jobs:
             cp COPYING "dist/${OUT_NAME}/"
           fi
 
+          cat > "dist/${OUT_NAME}/build-info.txt" <<EOF
+          name=${OUT_NAME}
+          repository=${GITHUB_REPOSITORY}
+          requested_ref=${REQUESTED_REF}
+          github_ref=${GITHUB_REF}
+          commit=${GITHUB_SHA}
+          short_sha=${SHORT_SHA}
+          llvm_mingw_tag=${LLVM_MINGW_TAG}
+          EOF
+
           file "dist/${OUT_NAME}/aarch64/"*.dll | tee "dist/${OUT_NAME}/file-info.txt"
 
           cd dist
@@ -180,21 +241,22 @@ jobs:
       - name: Upload unpacked artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.VKD3D_OUT_NAME }}
-          path: vkd3d-proton/dist/${{ env.VKD3D_OUT_NAME }}
+          name: ${{ steps.meta.outputs.out_name }}
+          path: dist/${{ steps.meta.outputs.out_name }}
           if-no-files-found: error
 
       - name: Publish GitHub Release asset
-        if: ${{ inputs.publish_release == 'true' }}
+        if: ${{ github.event.inputs.publish_release != 'false' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -eux
 
-          RELEASE_TAG="${VKD3D_OUT_NAME}"
-          RELEASE_TITLE="VKD3D-Proton ${VKD3D_REF} aarch64"
-          ZIP_PATH="vkd3d-proton/dist/${VKD3D_OUT_NAME}.zip"
+          OUT_NAME="${{ steps.meta.outputs.out_name }}"
+          RELEASE_TAG="${{ steps.meta.outputs.release_tag }}"
+          RELEASE_TITLE="${{ steps.meta.outputs.release_title }}"
+          ZIP_PATH="dist/${OUT_NAME}.zip"
 
           test -f "$ZIP_PATH"
 
@@ -204,7 +266,7 @@ jobs:
             gh release create "$RELEASE_TAG" \
               --repo "$GH_REPO" \
               --title "$RELEASE_TITLE" \
-              --notes "VKD3D-Proton ${VKD3D_REF} built for Windows ARM64 / aarch64 using llvm-mingw ${LLVM_MINGW_TAG}."
+              --notes "VKD3D-Proton aarch64 build from ${GITHUB_REPOSITORY}@${GITHUB_SHA} using llvm-mingw ${LLVM_MINGW_TAG}."
           fi
 
           gh release upload "$RELEASE_TAG" "$ZIP_PATH" \
